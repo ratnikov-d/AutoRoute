@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -103,7 +104,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.4"
+const appVersion = "1.0.5"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -124,6 +125,7 @@ func main() {
 	}
 	a.core = NewCore(dir)
 	a.load()
+	a.backupState()
 	a.ensureHWID()
 	a.core.SetSocksEnabled(a.socksOn())
 	a.auth = NewAuth(dir)
@@ -252,13 +254,24 @@ func (a *App) load() {
 		NodeMeta:        map[string]*nodeMeta{},
 		Sources:         []*Source{},
 	}
-	b, err := os.ReadFile(filepath.Join(a.dir, "state.json"))
-	if err != nil {
-		return
+	path := filepath.Join(a.dir, "state.json")
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		log.Printf("state.json: чтение: %v", err)
 	}
 	var st State
-	if err := json.Unmarshal(b, &st); err != nil {
-		return
+	if err == nil && len(b) > 0 {
+		if uerr := json.Unmarshal(b, &st); uerr != nil {
+			// Битый файл не затираем: откладываем копию и пробуем резерв.
+			bad := fmt.Sprintf("%s.bad-%d", path, time.Now().Unix())
+			_ = os.WriteFile(bad, b, 0o600)
+			log.Printf("state.json: разбор не удался (%v), копия в %s", uerr, filepath.Base(bad))
+			if bak, rerr := os.ReadFile(path + ".bak"); rerr == nil {
+				if jerr := json.Unmarshal(bak, &st); jerr == nil {
+					log.Print("state.json: восстановлен из state.json.bak")
+				}
+			}
+		}
 	}
 	switch st.Mode {
 	case "manual", "failover", "auto", "stable":
@@ -327,6 +340,21 @@ func (a *App) load() {
 	st.Nodes = kept
 	a.state = st
 	a.migrateSourcesLocked()
+}
+
+// backupState оставляет рядом копию рабочего state.json: если файл когда-нибудь
+// окажется битым, данные восстановятся из state.json.bak.
+func (a *App) backupState() {
+	path := filepath.Join(a.dir, "state.json")
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 || !json.Valid(b) {
+		return
+	}
+	tmp := path + ".bak.tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path+".bak")
 }
 
 // migrateSourcesLocked превращает старое поле source в один источник и
