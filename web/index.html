@@ -312,19 +312,25 @@ select option{background:var(--color-card);color:var(--color-foreground)}
 .src-grip:active{cursor:grabbing}
 .src.dragging{opacity:.92;border-color:var(--accent-line);box-shadow:var(--glow);position:relative;z-index:2}
 .src.drag-over{border-color:rgba(168,199,250,.55)}
-.src-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
+.src-title{display:flex;align-items:center;gap:var(--space-2);min-width:0;flex-wrap:wrap}
+.src-title .hw-in-title{font-size:11px}
+.src-title .hw-val{font-size:11px}
 .src-title .t{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .src-sub{font-size:11px;color:var(--color-muted-foreground);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .src-sub .ua-tag{display:inline-flex;align-items:center;gap:3px;vertical-align:baseline;white-space:nowrap}
-/* HWID: обычный текст, копируется только само значение */
+/* HWID: значение выделено как имя сервера/источника, рядом — кнопка копирования */
 .hw-head{white-space:nowrap;font-size:11.5px;color:var(--color-muted-foreground);
-  max-width:100%;overflow:hidden;text-overflow:ellipsis}
-.hw-copy{font-family:var(--font-mono);cursor:pointer}
-.hw-head .hw-copy{font-weight:400;color:inherit}
-.hw-copy:hover{text-decoration:underline}
-.hw-copy:focus-visible{outline:2px solid var(--color-primary,#3B9EFF);outline-offset:2px;border-radius:3px}
-.hw-head.off{opacity:.8}
+  display:inline-flex;align-items:center;gap:2px;max-width:100%;min-width:0}
+.hw-val{font-family:var(--font-mono);font-weight:600;color:var(--color-foreground,#e8eef7);
+  overflow:hidden;text-overflow:ellipsis}
+.hw-copy-btn{flex:0 0 auto;width:20px;height:20px;padding:0;border:0;background:none;
+  color:var(--color-muted-foreground);opacity:.75;cursor:pointer;display:inline-flex;
+  align-items:center;justify-content:center;border-radius:4px}
+.hw-copy-btn svg{width:12px;height:12px}
+.hw-copy-btn:hover{opacity:1;color:var(--color-foreground,#e8eef7);background:var(--hover-soft)}
+.hw-copy-btn:focus-visible{outline:2px solid var(--color-primary,#3B9EFF);outline-offset:1px}
+.hw-head.off .hw-val{font-weight:400;color:inherit}
 .src-sub .ua-tag svg{width:11px;height:11px;flex:0 0 auto;opacity:.8;margin-top:1px}
 .src-err{flex:1 1 100%;font-size:11.5px;color:var(--color-destructive-text);word-break:break-word}
 .src-actions{display:flex;align-items:center;gap:4px;flex:0 0 auto}
@@ -1905,9 +1911,11 @@ button:focus:not(:focus-visible){outline:none}
     if (inp) inp.tabIndex = on ? 0 : -1;
   }
 
-  // Клик по значению HWID копирует его; сама подпись «HWID» не кликабельна.
+  var HWID_COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 3H6.5A2.5 2.5 0 0 0 4 5.5v6A2.5 2.5 0 0 0 6.5 14"/></svg>';
+
+  // Копирование — только кнопкой справа от значения.
   function bindHwidCopy(root) {
-    (root || document).querySelectorAll('.hw-copy[data-copy]').forEach(function (el) {
+    (root || document).querySelectorAll('.hw-copy-btn[data-copy]').forEach(function (el) {
       if (el.dataset.bound) return;
       el.dataset.bound = '1';
       el.addEventListener('click', function (ev) {
@@ -1940,9 +1948,11 @@ button:focus:not(:focus-visible){outline:none}
         var sub = nodes + ' ' + plural(nodes, 'узел', 'узла', 'узлов') +
           (s.updated_at ? ' · обновлено ' + fmtAgo(s.updated_at) : '') +
           (s.hwid_off ? ' · HWID не передаётся' : '');
+        // HWID источника показываем в заголовке строки и только если он свой.
         var hwidTag = (!s.hwid_off && !(state && state.hwid_off) && hwidOwn)
-          ? ' · HWID <b class="hw-copy" data-copy="' + esc(hwidOwn) + '"' +
-              ' title="' + esc(hwidOwn) + ' — нажмите, чтобы скопировать">' + esc(hwidOwn) + '</b>'
+          ? '<span class="hw-head hw-in-title">HWID <b class="hw-val">' + esc(hwidOwn) + '</b>' +
+            '<button type="button" class="hw-copy-btn" data-copy="' + esc(hwidOwn) + '"' +
+            ' title="Скопировать HWID" aria-label="Скопировать HWID">' + HWID_COPY_ICON + '</button></span>'
           : '';
         // UA показываем только если задан вручную: у источника или в настройках.
         var uaManual = s.ua || (state && state.ua) || '';
@@ -1990,9 +2000,10 @@ button:focus:not(:focus-visible){outline:none}
             '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>' +
           '</span>' +
           '<div class="src-title"><span class="pill">' + kind + '</span>' +
-            '<span class="t" title="' + esc(s.value) + '">' + esc(s.title || s.value) + '</span></div>' +
+            '<span class="t" title="' + esc(s.value) + '">' + esc(s.title || s.value) + '</span>' +
+            hwidTag + '</div>' +
           '<div class="src-main">' +
-            '<div class="src-sub">' + esc(sub) + hwidTag + uaTag + '</div>' +
+            '<div class="src-sub">' + esc(sub) + uaTag + '</div>' +
             usageHTML(ui) +
           '</div>' +
           '<div class="src-side">' +
@@ -2071,8 +2082,9 @@ button:focus:not(:focus-visible){outline:none}
       } else if (globalHwid) {
         headHwid.hidden = false;
         headHwid.classList.remove('off');
-        headHwid.innerHTML = 'HWID <b class="hw-copy" data-copy="' + esc(globalHwid) + '"' +
-          ' title="' + esc(globalHwid) + ' — нажмите, чтобы скопировать">' + esc(globalHwid) + '</b>';
+        headHwid.innerHTML = 'HWID <b class="hw-val">' + esc(globalHwid) + '</b>' +
+          '<button type="button" class="hw-copy-btn" data-copy="' + esc(globalHwid) + '"' +
+          ' title="Скопировать HWID" aria-label="Скопировать HWID">' + HWID_COPY_ICON + '</button>';
         headHwid.removeAttribute('data-copy');
         headHwid.removeAttribute('title');
       } else {
