@@ -104,7 +104,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.10"
+const appVersion = "1.0.11"
 
 func main() {
 	log.SetFlags(log.LstdFlags)

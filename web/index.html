@@ -1949,10 +1949,9 @@ button:focus:not(:focus-visible){outline:none}
           (s.updated_at ? ' · обновлено ' + fmtAgo(s.updated_at) : '') +
           (s.hwid_off ? ' · HWID не передаётся' : '');
         // HWID источника показываем в заголовке строки и только если он свой.
+        // Кнопка копирования — только в заголовке раздела, тут просто выделенное значение.
         var hwidTag = (!s.hwid_off && !(state && state.hwid_off) && hwidOwn)
-          ? '<span class="hw-head hw-in-title">HWID <b class="hw-val">' + esc(hwidOwn) + '</b>' +
-            '<button type="button" class="hw-copy-btn" data-copy="' + esc(hwidOwn) + '"' +
-            ' title="Скопировать HWID" aria-label="Скопировать HWID">' + HWID_COPY_ICON + '</button></span>'
+          ? '<span class="hw-head hw-in-title">HWID <b class="hw-val">' + esc(hwidOwn) + '</b></span>'
           : '';
         // UA показываем только если задан вручную: у источника или в настройках.
         var uaManual = s.ua || (state && state.ua) || '';
