@@ -104,7 +104,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.8"
+const appVersion = "1.0.9"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -421,6 +421,7 @@ func (a *App) loop(ctx context.Context) {
 		case <-a.checkNow:
 			// Ручной запуск (кнопка или обновление источника) — через тот же цикл.
 			a.doCheck()
+			t.Reset(a.periodDur())
 		case <-a.intervalCh:
 			// Период или настройки изменились — пересоздаём ticker без перезапуска.
 			t.Stop()
@@ -429,6 +430,9 @@ func (a *App) loop(ctx context.Context) {
 			a.refreshDueSources(ctx)
 			a.maybeAutoUpdate(ctx)
 			a.doCheck()
+			// Период считается от конца цикла, а не от начала:
+			// иначе длинная HTTP-фаза съедала интервал и TCP стартовал раньше времени.
+			t.Reset(a.periodDur())
 		}
 	}
 }
@@ -561,6 +565,10 @@ func (a *App) doCheck() {
 		a.bumpProgress()
 	}
 
+	// Конец TCP-фазы: по этому времени UI считает «TCP … назад», иначе
+	// длинная HTTP-проверка сдвигала метку и оба таймера стартовали заново.
+	tcpAt := time.Now().Unix()
+
 	// Реальная задержка: одно временное ядро, запрос через каждый живой TCP-узел
 	// до адреса проверки (по умолчанию лёгкий 204-эндпоинт).
 	a.mu.Lock()
@@ -606,9 +614,10 @@ func (a *App) doCheck() {
 			break
 		}
 	}
+	httpAt := time.Now().Unix()
 	if len(realMS) > 0 {
 		a.mu.Lock()
-		a.latencyAt = time.Now().Unix()
+		a.latencyAt = httpAt
 		a.mu.Unlock()
 	}
 
@@ -623,10 +632,9 @@ func (a *App) doCheck() {
 			return
 		}
 	}
-	now := time.Now().Unix()
 	for i, n := range a.state.Nodes {
 		r := res[i]
-		n.Checked = now
+		n.Checked = tcpAt
 		if altUsed[n.ID] {
 			n.ObfsStripped = true
 		}
@@ -634,7 +642,7 @@ func (a *App) doCheck() {
 		_, hasReal := realMS[n.ID]
 		if hasReal {
 			n.RealMS = realMS[n.ID]
-			n.RealAt = now
+			n.RealAt = httpAt
 			m.RealFails = 0
 		} else if r.ok && len(realMS) > 0 {
 			n.RealMS, n.RealAt = 0, 0
@@ -648,7 +656,7 @@ func (a *App) doCheck() {
 		// QUIC проверяется временным ядром по HTTP — это уже реальная задержка.
 		if (n.Quic || n.AWG != "") && r.ok && r.ms > 0 {
 			n.RealMS = r.ms
-			n.RealAt = now
+			n.RealAt = tcpAt
 		}
 		switch {
 		case httpDead:
@@ -670,7 +678,7 @@ func (a *App) doCheck() {
 			n.LastErr = r.err
 		}
 	}
-	a.state.UpdatedAt = now
+	a.state.UpdatedAt = tcpAt
 	prev := a.state.Selected
 	failover := a.state.Mode == "failover"
 	activeID := a.state.Selected
@@ -684,7 +692,7 @@ func (a *App) doCheck() {
 	}
 	changed := a.state.Selected != prev
 	needApply := changed || !a.core.Running()
-	exitNeed := failover && a.exitStaleLocked(activeID, now)
+	exitNeed := failover && a.exitStaleLocked(activeID, tcpAt)
 	a.persistLocked()
 	a.mu.Unlock()
 
@@ -693,7 +701,7 @@ func (a *App) doCheck() {
 			a.requestApply()
 		}
 		// IP активного узла — через живой туннель, без временных ядер.
-		if activeID != "" && a.exitStaleLocked(activeID, now) && a.core.Running() && a.socksOn() {
+		if activeID != "" && a.exitStaleLocked(activeID, tcpAt) && a.core.Running() && a.socksOn() {
 			go func(id string) {
 				res := a.lookupExit()
 				if !res.OK || res.IP == "" {
