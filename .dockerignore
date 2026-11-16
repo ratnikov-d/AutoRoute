@@ -1,0 +1,6 @@
+*.tar
+*.log
+state.json
+config.json*
+autoroute.log
+xray.log

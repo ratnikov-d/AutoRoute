@@ -1,0 +1,17 @@
+# служебные файлы для работы агента — в репозиторий не попадают
+AGENTS.md
+.opencode/
+
+# сборка и артефакты
+out/
+*.tar
+*.exe
+*.log
+
+# данные контейнера
+state.json
+auth.json
+config.json
+core/xray
+
+.DS_Store
