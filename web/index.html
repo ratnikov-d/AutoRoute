@@ -317,6 +317,13 @@ select option{background:var(--color-card);color:var(--color-foreground)}
 .src-sub{font-size:11px;color:var(--color-muted-foreground);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .src-sub .ua-tag{display:inline-flex;align-items:center;gap:3px;vertical-align:baseline;white-space:nowrap}
+.hw-tag.hw-head{white-space:nowrap;font-size:11.5px;color:var(--color-muted-foreground);
+  border:1px solid var(--color-border);border-radius:999px;padding:2px 8px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:4px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.hw-tag.hw-head b{font-weight:600;font-family:var(--font-mono);color:var(--color-foreground,#e8eef7)}
+.hw-tag.hw-head:hover{border-color:rgba(168,199,250,.45)}
+.hw-tag.hw-head:focus-visible{outline:2px solid var(--color-primary,#3B9EFF);outline-offset:2px}
+.hw-tag.hw-head.off{cursor:default;opacity:.7}
 .src-sub .hw-tag{white-space:nowrap;cursor:pointer;border-bottom:1px dotted transparent}
 .src-sub .hw-tag:hover{border-bottom-color:currentColor}
 .src-sub .hw-tag:focus-visible{outline:2px solid var(--color-primary,#3B9EFF);outline-offset:2px;border-radius:3px}
@@ -850,6 +857,7 @@ button:focus:not(:focus-visible){outline:none}
     <section class="card span-all">
       <div class="card-head">
         <h2>Источники</h2>
+        <span class="hw-tag hw-head" id="src-hwid" role="button" tabindex="0" hidden></span>
         <span class="spacer"></span>
         <span class="muted small" id="src-info"></span>
         <button class="btn tonal sm" id="src-add-btn" type="button">
@@ -1890,7 +1898,24 @@ button:focus:not(:focus-visible){outline:none}
     if (inp) inp.tabIndex = on ? 0 : -1;
   }
 
+  var srcHwidBound = false;
+  function bindHeadHwid() {
+    if (srcHwidBound) return;
+    var el = $('#src-hwid');
+    if (!el) return;
+    srcHwidBound = true;
+    el.addEventListener('click', function () {
+      if (el.dataset.copy) copyText(el.dataset.copy);
+    });
+    el.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault();
+      if (el.dataset.copy) copyText(el.dataset.copy);
+    });
+  }
+
   function renderSources() {
+    bindHeadHwid();
     if (srcDrag) return; // идёт перетаскивание — не подменяем DOM
     var list = state.sources || [];
     var wrap = $('#src-list');
@@ -1901,16 +1926,16 @@ button:focus:not(:focus-visible){outline:none}
         var kind = s.kind === 'url' ? 'Подписка' : 'Ссылки';
         var nodes = s.nodes_count || 0;
         // Показываем действующие значения: своё у источника, иначе общее из настроек.
-        var hwidOff = s.hwid_off || (state && state.hwid_off);
-        var hwidEff = s.hwid || (state && state.hwid) || '';
+        // В строке — только HWID, заданный именно этому источнику;
+        // общий показывается в заголовке раздела.
+        var hwidOwn = (s.hwid || '').trim();
         var sub = nodes + ' ' + plural(nodes, 'узел', 'узла', 'узлов') +
           (s.updated_at ? ' · обновлено ' + fmtAgo(s.updated_at) : '') +
-          (hwidOff ? ' · HWID не передаётся' : '');
-        // HWID показываем целиком: по клику копируется в буфер.
-        var hwidTag = (!hwidOff && hwidEff)
-          ? ' · <span class="hw-tag" role="button" tabindex="0" data-copy="' + esc(hwidEff) + '"' +
-              ' title="HWID: ' + esc(hwidEff) + ' — нажмите, чтобы скопировать">HWID <b>' +
-              esc(hwidEff) + '</b></span>'
+          (s.hwid_off ? ' · HWID не передаётся' : '');
+        var hwidTag = (!s.hwid_off && !(state && state.hwid_off) && hwidOwn)
+          ? ' · <span class="hw-tag" role="button" tabindex="0" data-copy="' + esc(hwidOwn) + '"' +
+              ' title="HWID источника: ' + esc(hwidOwn) + ' — нажмите, чтобы скопировать">HWID <b>' +
+              esc(hwidOwn) + '</b></span>'
           : '';
         // UA показываем только если задан вручную: у источника или в настройках.
         var uaManual = s.ua || (state && state.ua) || '';
@@ -2035,6 +2060,28 @@ button:focus:not(:focus-visible){outline:none}
     var total = (state.nodes || []).length;
     $('#src-info').textContent = enabledCount + ' ' + plural(enabledCount, 'источник', 'источника', 'источников') +
       ' · ' + total + ' ' + plural(total, 'узел', 'узла', 'узлов');
+
+    // Общий HWID — в заголовке раздела: видно, что уходит в подписки по умолчанию.
+    var headHwid = $('#src-hwid');
+    if (headHwid) {
+      var globalHwid = (state && state.hwid) || '';
+      var globalOff = !!(state && state.hwid_off);
+      if (globalOff) {
+        headHwid.hidden = false;
+        headHwid.classList.add('off');
+        headHwid.textContent = 'HWID не передаётся';
+        headHwid.removeAttribute('data-copy');
+        headHwid.removeAttribute('title');
+      } else if (globalHwid) {
+        headHwid.hidden = false;
+        headHwid.classList.remove('off');
+        headHwid.innerHTML = 'HWID <b>' + esc(globalHwid) + '</b>';
+        headHwid.dataset.copy = globalHwid;
+        headHwid.title = 'Общий HWID: ' + globalHwid + ' — нажмите, чтобы скопировать';
+      } else {
+        headHwid.hidden = true;
+      }
+    }
 
     // Сводка по лимитам: только если total есть у двух и более источников.
     var withTotal = [];
