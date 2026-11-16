@@ -101,6 +101,9 @@ func envInt(k string, def int) int {
 	return def
 }
 
+// appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
+const appVersion = "1.0.1"
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 	dir := envOr("DATA_DIR", "/data")
@@ -1005,6 +1008,7 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 		"sub_error":             st.SubErr,
 		"core":                  a.core.Info(),
 		"app_uptime_sec":        int64(time.Since(a.startedAt).Seconds()),
+		"app_version":           appVersion,
 		"core_starts":           a.coreStarts,
 		"checking":              checking,
 		"check_interval":        interval,

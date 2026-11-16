@@ -937,7 +937,7 @@ button:focus:not(:focus-visible){outline:none}
   </main>
 
   <footer class="app-foot">
-    <span class="af-left">AutoRoute <span class="af-ver">ver. 1.0.0</span></span>
+    <span class="af-left">AutoRoute <span class="af-ver">ver. <span id="app-ver">—</span></span></span>
     <span class="af-links">
       <a href="https://github.com/ratnikov-d/AutoRoute" target="_blank" rel="noopener">github</a>
       <span class="af-sep">·</span>
@@ -1385,7 +1385,14 @@ button:focus:not(:focus-visible){outline:none}
   // База для секундного тикера uptime: сервер отдаёт снимок раз в 5 с.
   var uptimeBase = { sec: 0, at: 0 };
 
+  function renderFooterVersion() {
+    var el = $('#app-ver');
+    if (!el) return;
+    el.textContent = (state && state.app_version) || '—';
+  }
+
   function renderStatus() {
+    renderFooterVersion();
     var c = state.core || {};
     var cur = currentNode();
     var socksOn = state.socks_enabled !== false;
