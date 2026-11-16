@@ -6,15 +6,14 @@ import (
 	"strings"
 )
 
-// newHWID — UUID v4: стабильный идентификатор устройства для панелей подписок.
+// newHWID — короткий идентификатор устройства, как у клиентов Happ/Hiddify:
+// 8 случайных байт в hex (16 символов). Панели подписок ожидают именно такой.
 func newHWID() string {
-	var b [16]byte
+	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return ""
 	}
-	b[6] = (b[6] & 0x0f) | 0x40 // версия 4
-	b[8] = (b[8] & 0x3f) | 0x80 // вариант RFC 4122
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x", b)
 }
 
 func ellipsis(s string, n int) string {
