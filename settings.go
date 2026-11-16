@@ -201,6 +201,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.HWID != nil {
 			a.state.HWID = strings.TrimSpace(*body.HWID)
+			a.state.HWIDAuto = false
 		}
 		if body.HWIDOff != nil {
 			a.state.HWIDOff = *body.HWIDOff

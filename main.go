@@ -44,6 +44,7 @@ type State struct {
 	SocksEnabled    bool            `json:"socks_enabled"`
 	CoreAutoupdate  bool            `json:"core_autoupdate"`
 	HWID            string          `json:"hwid,omitempty"`
+	HWIDAuto        bool            `json:"hwid_auto,omitempty"` // сгенерирован при первом запуске
 	UA              string          `json:"ua,omitempty"`
 	HWIDOff         bool            `json:"hwid_off,omitempty"`
 	LatencyURL      string          `json:"latency_url,omitempty"`
@@ -102,7 +103,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.1"
+const appVersion = "1.0.2"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -123,6 +124,7 @@ func main() {
 	}
 	a.core = NewCore(dir)
 	a.load()
+	a.ensureHWID()
 	a.core.SetSocksEnabled(a.socksOn())
 	a.auth = NewAuth(dir)
 
@@ -196,6 +198,22 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(sctx)
 	a.core.Stop()
+}
+
+// ensureHWID выдаёт устройству собственный HWID при первом запуске с пустым
+// конфигом и записывает его в state.json: у разных пользователей значения разные,
+// а повторные запуски и смены образа его не меняют. Явно заданный HWID
+// (в настройках или у источника) не трогаем.
+func (a *App) ensureHWID() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if strings.TrimSpace(a.state.HWID) != "" || a.state.HWIDAuto {
+		return
+	}
+	a.state.HWID = newHWID()
+	a.state.HWIDAuto = true
+	a.persistLocked()
+	log.Printf("HWID: сгенерирован %s", a.state.HWID)
 }
 
 // ensureResolvConf: RouterOS без `dns=` оставляет /etc/resolv.conf пустым —
