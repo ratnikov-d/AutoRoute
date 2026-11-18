@@ -15,3 +15,5 @@ config.json
 core/xray
 
 .DS_Store
+
+.hallmark/

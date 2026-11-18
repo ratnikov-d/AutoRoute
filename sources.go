@@ -176,7 +176,7 @@ const browserUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, li
 
 // clientUA — большинство панелей отдают полный список серверов только
 // клиентским приложениям. Браузеру достаётся урезанный набор ключей.
-const clientUA = "Hiddify/2.0.0"
+const clientUA = "Happ/2.1.0"
 
 // normalizeSubscriptionBody понимает формат панелей Remnawave и подобных:
 // вместо списка ссылок они отдают JSON {"keys":[{"base_key":"vless://..."}]}.
@@ -363,6 +363,10 @@ func fetchSourceOnce(ctx context.Context, u, hwid, ua string) (text, title strin
 		}
 	}
 	raw = normalizeSubscriptionBody(raw)
+	// Happ/Hiddify отдают массив Xray-конфигов вместо списка ссылок.
+	if links := xrayConfigsToLinks(raw); links != "" {
+		raw = links
+	}
 	text = maybeBase64(raw)
 	if title == "" {
 		title = titleFromBody(raw)
@@ -658,7 +662,7 @@ func (a *App) addSource(ctx context.Context, kind, value, title, hwid string, hw
 	if err == nil {
 		added = len(nodes)
 		a.requestApply()
-		a.requestCheck()
+		a.requestSourceCheck(nodeIDs(nodes))
 	}
 	return src, added, skipped, err
 }
@@ -711,8 +715,19 @@ func (a *App) refreshSource(ctx context.Context, id string) error {
 	a.mu.Unlock()
 
 	a.requestApply()
-	a.requestCheck()
+	a.requestSourceCheck(nodeIDs(nodes))
 	return nil
+}
+
+// nodeIDs — идентификаторы узлов для прицельной проверки подписки.
+func nodeIDs(nodes []*Node) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			out = append(out, n.ID)
+		}
+	}
+	return out
 }
 
 // refreshDueSources обновляет URL-подписки по их refresh_hours (или глобальному дефолту).

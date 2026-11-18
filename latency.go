@@ -21,9 +21,10 @@ import (
 const defaultLatencyURL = "https://www.gstatic.com/generate_204"
 
 const (
-	latencyProbeWorkers = 2
-	latencyFresh        = 20 * time.Minute
-	defaultLatencyMin   = 5 // как часто мерить HTTP-задержку, если не задано
+	latencyProbeWorkers   = 4
+	latencyRequestTimeout = 10 * time.Second
+	latencyFresh          = 20 * time.Minute
+	defaultLatencyMin   = 10 // как часто мерить HTTP-задержку, если не задано
 	minLatencyMin       = 1
 	maxLatencyMin       = 60
 )
@@ -186,7 +187,9 @@ func (c *Core) probeHTTPBatch(ctx context.Context, nodes []*Node, target string,
 			defer func() { <-sem }()
 			// лёгкая пауза: серверы не любят пачку одновременных рукопожатий
 			time.Sleep(120 * time.Millisecond)
-			res := probeSocks(ctx, p.port, target, false)
+			pctx, pcancel := context.WithTimeout(ctx, latencyRequestTimeout)
+			res := probeSocks(pctx, p.port, target, false)
+			pcancel()
 			if res.OK && res.MS > 0 {
 				mu.Lock()
 				out[p.id] = res.MS

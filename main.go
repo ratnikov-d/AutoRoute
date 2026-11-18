@@ -75,6 +75,7 @@ type App struct {
 	applyQueued bool
 	intervalCh  chan struct{}
 	checkNow    chan struct{}
+	pendingCheckIDs map[string]bool // узлы новой/обновлённой подписки — проверить в следующем цикле
 	appliedID   string             // узел, реально применённый ядром
 	srcNodes    map[string][]*Node // узлы по источникам (в памяти, восстанавливаются из state)
 	refreshing  bool
@@ -82,7 +83,8 @@ type App struct {
 	latencyAt   int64
 	startedAt   time.Time
 	coreStarts  int64
-	forceLatency bool
+	forceLatency    bool
+	forceAllLatency bool // первый цикл после старта: замерить все узлы независимо от режима
 	progress    checkProgress
 	lastAutoUpd int64 // unix: когда автообновление последний раз отрабатывало
 }
@@ -104,7 +106,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.11"
+const appVersion = "1.0.44"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -125,6 +127,7 @@ func main() {
 	}
 	a.core = NewCore(dir)
 	a.load()
+	a.forceAllLatency = true
 	a.backupState()
 	a.ensureHWID()
 	a.core.SetSocksEnabled(a.socksOn())
@@ -141,6 +144,7 @@ func main() {
 	go a.bootCore(ctx)
 	if hasNodes && a.core.Ready() {
 		a.requestApply()
+		a.requestLatencyCheck()
 	}
 
 	mux := http.NewServeMux()
@@ -499,45 +503,20 @@ func copyNodes(nodes []*Node) []*Node {
 }
 
 // doCheck пингует все узлы и в авторежиме выбирает лучший.
-func (a *App) doCheck() {
-	a.mu.Lock()
-	if a.checking {
-		a.mu.Unlock()
-		return
-	}
-	a.checking = true
-	nodes := copyNodes(a.state.Nodes)
-	interval := int(a.checkDur.Seconds())
-	a.mu.Unlock()
-	if len(nodes) > 0 {
-		log.Printf("проверка: %d узлов, интервал %d с", len(nodes), interval)
-	}
-
-	defer func() {
-		a.mu.Lock()
-		a.checking = false
-		a.mu.Unlock()
-	}()
-
-	if len(nodes) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	a.beginProgress(len(nodes), "tcp")
-	res := checkAllProgress(ctx, nodes, a.bumpProgress)
-
-	// QUIC-узлы (hysteria2) по TCP не проверить: гоняем реальный запрос через временное ядро,
-	// чтобы они получали настоящий статус и пинг и могли участвовать в авто/failover.
+// checkAvailability — TCP+TLS по списку узлов; QUIC/AWG проверяются настоящим
+// запросом через временное ядро. Возвращает результаты по id и признак obfs-strip.
+func (a *App) checkAvailability(ctx context.Context, nodes []*Node) (map[string]checkResult, map[string]bool) {
+	res := make(map[string]checkResult, len(nodes))
 	altUsed := map[string]bool{}
-	idx := make(map[string]int, len(nodes))
-	quicTotal := 0
-	for i, n := range nodes {
-		idx[n.ID] = i
-		if n.Quic || n.AWG != "" {
-			quicTotal++
-		}
+	if len(nodes) == 0 {
+		return res, altUsed
 	}
+	partial := checkAllProgress(ctx, nodes, a.bumpProgress)
+	for i, n := range nodes {
+		res[n.ID] = partial[i]
+	}
+	// QUIC-узлы (hysteria2) по TCP не проверить: гоняем реальный запрос через
+	// временное ядро, чтобы они получали настоящий статус и задержку.
 	var quic []*Node
 	a.mu.Lock()
 	for _, n := range nodes {
@@ -549,58 +528,278 @@ func (a *App) doCheck() {
 	a.mu.Unlock()
 	for _, n := range quic {
 		ok, ms, errMsg, usedAlt := a.core.ProbeNode(ctx, n)
-		i := idx[n.ID]
 		if ok {
-			res[i] = checkResult{ok: true, ms: ms}
+			res[n.ID] = checkResult{ok: true, ms: ms}
 			if usedAlt {
 				altUsed[n.ID] = true
 			}
 		} else {
-			res[i] = checkResult{err: errMsg}
+			res[n.ID] = checkResult{err: errMsg}
 		}
 		a.bumpProgress()
 	}
-	// Пропущенные QUIC-узлы (отключённые/неподдерживаемые) тоже считаем пройденными.
-	for k := len(quic); k < quicTotal; k++ {
-		a.bumpProgress()
+	for _, n := range nodes {
+		if (n.Quic || n.AWG != "") && n.Unsupported != "" {
+			a.bumpProgress()
+		} else if (n.Quic || n.AWG != "") && a.nodeDisabled(n) {
+			a.bumpProgress()
+		}
 	}
+	return res, altUsed
+}
 
-	// Конец TCP-фазы: по этому времени UI считает «TCP … назад», иначе
-	// длинная HTTP-проверка сдвигала метку и оба таймера стартовали заново.
-	tcpAt := time.Now().Unix()
-
-	// Реальная задержка: одно временное ядро, запрос через каждый живой TCP-узел
-	// до адреса проверки (по умолчанию лёгкий 204-эндпоинт).
+// nodeDisabled — потокобезопасная проверка ручного выключателя узла.
+func (a *App) nodeDisabled(n *Node) bool {
 	a.mu.Lock()
-	latURL := latencyURL(a.state.LatencyURL)
-	latEvery := time.Duration(clampLatencyMin(a.state.LatencyMin)) * time.Minute
-	runLatency := a.forceLatency || time.Since(time.Unix(a.latencyAt, 0)) >= latEvery
-	a.forceLatency = false
-	var liveNodes []*Node
-	missing := 0
-	for i, n := range nodes {
-		if res[i].ok && !n.Quic && n.AWG == "" {
-			cp := *n
-			liveNodes = append(liveNodes, &cp)
-			if freshReal(n) == 0 {
-				missing++
+	defer a.mu.Unlock()
+	return a.nodeDisabledLocked(n)
+}
+
+// applyChecksLocked обновляет статусы только узлов, которые реально проверялись
+// в этом цикле, плюс результаты HTTP-замера. Остальные сохраняют прошлый статус.
+func (a *App) applyChecksLocked(nodes []*Node, res map[string]checkResult, checked map[string]bool,
+	altUsed map[string]bool, realMS map[string]int64, inBatch map[string]bool,
+	runLatency bool, tcpAt, httpAt int64) {
+
+	for _, n := range nodes {
+		r, wasChecked := res[n.ID]
+		if wasChecked {
+			n.Checked = tcpAt
+			if altUsed[n.ID] {
+				n.ObfsStripped = true
+			}
+		}
+		m := a.metaLocked(n.ID)
+		if runLatency && inBatch[n.ID] {
+			m.LatencyTriedAt = httpAt
+		}
+		if ms, hasReal := realMS[n.ID]; hasReal {
+			n.RealMS = ms
+			n.RealAt = httpAt
+			m.RealFails = 0
+		} else if runLatency && inBatch[n.ID] {
+			n.RealMS, n.RealAt = 0, 0
+			m.RealFails++
+		}
+		quic := n.Quic || n.AWG != ""
+		httpDead := m.RealFails > 0 && !quic && (wasChecked || inBatch[n.ID])
+		if quic && wasChecked && r.ok && r.ms > 0 {
+			n.RealMS = r.ms
+			n.RealAt = tcpAt
+		}
+		switch {
+		case httpDead:
+			n.Status = "fail"
+			n.Latency = 0
+			n.RealMS, n.RealAt = 0, 0
+			n.LastErr = "узел не пропускает HTTP"
+		case realMS[n.ID] > 0:
+			// HTTP прошёл — этого достаточно, даже если TCP этого узла
+			// в этом цикле не проверяли (резервные узлы).
+			n.Status = "ok"
+			n.Latency = realMS[n.ID]
+			n.LastErr = ""
+		case wasChecked && r.ok:
+			n.Status = "ok"
+			n.Latency = r.ms
+			n.LastErr = ""
+		case wasChecked && r.status != "":
+			n.Status = r.status
+			n.Latency = 0
+			n.LastErr = r.err
+		case wasChecked:
+			n.Status = "fail"
+			n.Latency = 0
+			n.LastErr = r.err
+		}
+	}
+}
+
+// checkRest — разовая проверка остальных узлов в момент поломки активного.
+// Вызывается и при провале TCP-проверки, и при провале реальной передачи
+// в failover: резервы не опрашиваются каждый цикл.
+func (a *App) checkRest(ctx context.Context, nodes []*Node, activeID string,
+	res map[string]checkResult, checked, altUsed map[string]bool) bool {
+
+	var rest []*Node
+	for _, n := range nodes {
+		if n.ID == activeID || n.Unsupported != "" || a.nodeDisabled(n) {
+			continue
+		}
+		cp := *n
+		rest = append(rest, &cp)
+	}
+	if len(rest) == 0 {
+		return false
+	}
+	a.beginProgress(len(rest), "tcp")
+	rr, ra := a.checkAvailability(ctx, rest)
+	for id, r := range rr {
+		res[id] = r
+		checked[id] = true
+	}
+	for id := range ra {
+		altUsed[id] = true
+	}
+	return true
+}
+
+func (a *App) doCheck() {
+	a.mu.Lock()
+	if a.checking {
+		a.mu.Unlock()
+		return
+	}
+	a.checking = true
+	nodes := copyNodes(a.state.Nodes)
+	interval := int(a.checkDur.Seconds())
+	activeID := a.state.Selected
+	mode := a.state.Mode
+	pending := a.pendingCheckIDs
+	a.pendingCheckIDs = nil
+	a.mu.Unlock()
+	if len(nodes) > 0 {
+		log.Printf("проверка доступности активного узла, интервал %d с", interval)
+	}
+	defer func() {
+		a.mu.Lock()
+		a.checking = false
+		a.mu.Unlock()
+	}()
+	if len(nodes) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 1) Регулярная проверка доступности — только активный узел.
+	res := map[string]checkResult{}
+	checked := map[string]bool{}
+	altUsed := map[string]bool{}
+	active := findNode(nodes, activeID)
+	var activeList []*Node
+	seenCheck := map[string]bool{}
+	if active != nil && active.Unsupported == "" {
+		cp := *active
+		activeList = append(activeList, &cp)
+		seenCheck[cp.ID] = true
+	}
+	for _, n := range nodes {
+		if !pending[n.ID] || seenCheck[n.ID] || n.Unsupported != "" {
+			continue
+		}
+		cp := *n
+		activeList = append(activeList, &cp)
+		seenCheck[cp.ID] = true
+	}
+	a.beginProgress(len(activeList), "tcp")
+	ar, aa := a.checkAvailability(ctx, activeList)
+	for id, r := range ar {
+		res[id] = r
+		checked[id] = true
+	}
+	for id := range aa {
+		altUsed[id] = true
+	}
+	activeBad := active != nil && (!res[active.ID].ok || res[active.ID].status != "")
+	restChecked := false
+	if activeBad {
+		switch mode {
+		case "auto":
+			// Сразу уходим на лучший по прошлым замерам, затем запускаем новый замер.
+			a.mu.Lock()
+			if best := a.bestMeasuredLocked(); best != nil && best.ID != activeID {
+				a.state.Selected = best.ID
+				activeID = best.ID
+			}
+			a.forceLatency = true
+			a.mu.Unlock()
+		case "stable":
+			// Проверить все и выбрать лучшего по свежим замерам.
+			a.mu.Lock()
+			a.forceLatency = true
+			a.mu.Unlock()
+		default:
+			// failover: проверить резервы в момент поломки; manual —ничего не трогаем.
+			if mode == "failover" {
+				restChecked = a.checkRest(ctx, nodes, activeID, res, checked, altUsed)
 			}
 		}
 	}
-	// После старта или после долгого простоя замеров нет почти у всех — меряем сразу,
-	// не дожидаясь периода.
-	if len(liveNodes) > 0 && missing*2 > len(liveNodes) {
-		runLatency = true
+	tcpAt := time.Now().Unix()
+
+	// 2) Реальная HTTP-задержка — на всех узлах согласно настройке.
+	a.mu.Lock()
+	latURL := latencyURL(a.state.LatencyURL)
+	latEvery := time.Duration(clampLatencyMin(a.state.LatencyMin)) * time.Minute
+	forceAll := a.forceAllLatency
+	a.forceAllLatency = false
+	runLatency := a.forceLatency || forceAll || time.Since(time.Unix(a.latencyAt, 0)) >= latEvery
+	a.forceLatency = false
+	chainIDs := map[string]bool{}
+	if mode == "failover" {
+		for _, id := range a.state.FailoverChain {
+			chainIDs[id] = true
+		}
+	}
+	selectedID := a.state.Selected
+	latIDs := map[string]bool{}
+	var liveNodes []*Node
+	for _, n := range nodes {
+		if n.Unsupported != "" || a.nodeDisabledLocked(n) {
+			continue
+		}
+		include := false
+		switch mode {
+		case "auto":
+			include = true // лучший по задержке — меряем всех
+		case "stable":
+			include = n.ID == selectedID || activeBad || forceAll || pending[n.ID]
+		case "failover":
+			include = n.ID == selectedID || chainIDs[n.ID] || forceAll || pending[n.ID]
+		default: // manual
+			include = n.ID == selectedID || forceAll || pending[n.ID]
+		}
+		if !include {
+			continue
+		}
+		latIDs[n.ID] = true
+		if n.Quic || n.AWG != "" {
+			continue // QUIC/AWG меряются отдельным запросом ниже
+		}
+		cp := *n
+		liveNodes = append(liveNodes, &cp)
 	}
 	a.mu.Unlock()
-	// Пачки по 6: одно ядро с десятками SOCKS-инобаундов ведёт себя нестабильно.
-	// Свой контекст: цикл проверки живёт 60 с, а замер всех узлов дольше.
-	realMS := make(map[string]int64, len(liveNodes))
 	if runLatency && len(liveNodes) > 0 {
-		// Вторая фаза: счётчик показывает, сколько узлов уже измерено HTTP.
+		log.Printf("замер HTTP-задержки: %d узлов", len(liveNodes))
+	}
+	inBatch := map[string]bool{}
+	for _, n := range liveNodes {
+		inBatch[n.ID] = true
+	}
+	realMS := make(map[string]int64, len(liveNodes))
+	// QUIC/AWG не идут через HTTP-батч — меряем их тем же расписанием отдельно.
+	if runLatency {
+		for _, n := range nodes {
+			if (!n.Quic && n.AWG == "") || n.Unsupported != "" || a.nodeDisabled(n) || !latIDs[n.ID] {
+				continue
+			}
+			cp := *n
+			ok, ms, _, usedAlt := a.core.ProbeNode(ctx, &cp)
+			inBatch[n.ID] = true
+			if ok && ms > 0 {
+				realMS[n.ID] = ms
+				if usedAlt {
+					altUsed[n.ID] = true
+				}
+			}
+		}
+	}
+	if runLatency && len(liveNodes) > 0 {
 		a.beginProgress(len(liveNodes), "http")
 	}
-	latCtx, latCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	latCtx, latCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer latCancel()
 	for start := 0; runLatency && start < len(liveNodes); start += 6 {
 		end := start + 6
@@ -615,12 +814,26 @@ func (a *App) doCheck() {
 		}
 	}
 	httpAt := time.Now().Unix()
+	// Ядро не готово или замер прерван — это «не проверен», а не «не проходит HTTP».
+	latencyForApply := runLatency && a.core.Ready() && latCtx.Err() == nil
 	if len(realMS) > 0 {
 		a.mu.Lock()
 		a.latencyAt = httpAt
 		a.mu.Unlock()
 	}
 
+	// Нет активного узла (первый запуск, пустой selected) — один раз проверяем
+	// кандидатов до захвата мьютекса: checkRest сам работает с состоянием.
+	a.mu.Lock()
+	selectedNow := a.state.Selected
+	a.mu.Unlock()
+	if selectedNow == "" || findNode(nodes, selectedNow) == nil {
+		if mode == "failover" {
+			a.checkRest(ctx, nodes, selectedNow, res, checked, altUsed)
+		}
+	}
+
+	// 3) Применяем результаты, считаем выбор и сохраняем состояние.
 	a.mu.Lock()
 	if len(a.state.Nodes) != len(nodes) {
 		a.mu.Unlock()
@@ -632,58 +845,23 @@ func (a *App) doCheck() {
 			return
 		}
 	}
-	for i, n := range a.state.Nodes {
-		r := res[i]
-		n.Checked = tcpAt
-		if altUsed[n.ID] {
-			n.ObfsStripped = true
-		}
-		m := a.metaLocked(n.ID)
-		_, hasReal := realMS[n.ID]
-		if hasReal {
-			n.RealMS = realMS[n.ID]
-			n.RealAt = httpAt
-			m.RealFails = 0
-		} else if r.ok && len(realMS) > 0 {
-			n.RealMS, n.RealAt = 0, 0
-		}
-		// Узел отвечает по TCP, но HTTP через него не идёт (белые списки,
-		// чужая REALITY-обвязка) — считаем нерабочим до первого успешного HTTP.
-		if runLatency && r.ok && !n.Quic && n.AWG == "" && !hasReal && len(realMS) > 0 {
-			m.RealFails++
-		}
-		httpDead := r.ok && !n.Quic && n.AWG == "" && m.RealFails > 0
-		// QUIC проверяется временным ядром по HTTP — это уже реальная задержка.
-		if (n.Quic || n.AWG != "") && r.ok && r.ms > 0 {
-			n.RealMS = r.ms
-			n.RealAt = tcpAt
-		}
-		switch {
-		case httpDead:
-			n.Status = "fail"
-			n.Latency = 0
-			n.RealMS, n.RealAt = 0, 0
-			n.LastErr = "узел не пропускает HTTP"
-		case r.ok:
-			n.Status = "ok"
-			n.Latency = r.ms
-			n.LastErr = ""
-		case r.status != "":
-			n.Status = r.status
-			n.Latency = 0
-			n.LastErr = r.err
-		default:
-			n.Status = "fail"
-			n.Latency = 0
-			n.LastErr = r.err
-		}
-	}
+	a.applyChecksLocked(a.state.Nodes, res, checked, altUsed, realMS, inBatch, latencyForApply, tcpAt, httpAt)
 	a.state.UpdatedAt = tcpAt
 	prev := a.state.Selected
 	failover := a.state.Mode == "failover"
-	activeID := a.state.Selected
+	activeID = a.state.Selected
+	// После проверки кандидатов выбираем лучшего — иначе failover останется без узла.
+	if activeID == "" || findNode(a.state.Nodes, activeID) == nil {
+		if len(checked) > len(activeList) {
+			a.applyChecksLocked(a.state.Nodes, res, checked, altUsed, realMS, inBatch, false, tcpAt, httpAt)
+		}
+		if best := a.pickBestLocked(); best != nil {
+			a.state.Selected = best.ID
+			activeID = best.ID
+		}
+	}
 	if failover {
-		a.countersFromAvailabilityLocked(activeID)
+		a.countersFromAvailabilityLocked(activeID, checked)
 		if a.state.ReturnToPrimary && a.state.Primary == "" && activeID != "" {
 			a.state.Primary = activeID
 		}
@@ -700,7 +878,6 @@ func (a *App) doCheck() {
 		if needApply {
 			a.requestApply()
 		}
-		// IP активного узла — через живой туннель, без временных ядер.
 		if activeID != "" && a.exitStaleLocked(activeID, tcpAt) && a.core.Running() && a.socksOn() {
 			go func(id string) {
 				res := a.lookupExit()
@@ -729,6 +906,15 @@ func (a *App) doCheck() {
 		if okChannel && exitNeed {
 			exit = a.lookupExit()
 		}
+		if !okChannel && !restChecked {
+			// Канал упал — checkRest ещё не вызывали: проверяем резервы перед выбором.
+			restChecked = a.checkRest(ctx, nodes, activeID, res, checked, altUsed)
+			a.mu.Lock()
+			a.applyChecksLocked(a.state.Nodes, res, checked, altUsed, realMS, inBatch, false, tcpAt, httpAt)
+			// Повторно считаем счётчики с учётом только что проверенных резервов.
+			a.countersFromAvailabilityLocked(activeID, checked)
+			a.mu.Unlock()
+		}
 	}
 
 	a.mu.Lock()
@@ -736,11 +922,13 @@ func (a *App) doCheck() {
 		a.mu.Unlock()
 		return
 	}
-	if probed {
+	if probed && a.state.Selected == activeID && a.appliedID == activeID {
 		a.recordChannelLocked(activeID, chRes)
 		a.recordExitLocked(activeID, exit)
+	} else if probed {
+		// Пока шла проба, активный узел сменился — чужие счётчики не трогаем.
+		log.Printf("failover: проба узла %s устарела (selected=%s)", activeID, a.state.Selected)
 	} else {
-		// Ядро не работает: считаем это провалом активного узла.
 		m := a.metaLocked(activeID)
 		m.Fails++
 		m.Oks = 0
@@ -796,6 +984,25 @@ func (a *App) autoSelectLocked() {
 	}
 }
 
+// bestMeasuredLocked — лучший узел по уже измеренной HTTP-задержке.
+// Нужно в auto: если активный упал по TCP, переключаемся сразу по прошлым замерам.
+func (a *App) bestMeasuredLocked() *Node {
+	var best *Node
+	for _, n := range a.state.Nodes {
+		if n == nil || n.Unsupported != "" || a.nodeDisabledLocked(n) || a.blacklisted(n.ID) {
+			continue
+		}
+		ms := freshReal(n)
+		if ms <= 0 {
+			continue
+		}
+		if best == nil || ms < freshReal(best) {
+			best = n
+		}
+	}
+	return best
+}
+
 func (a *App) blacklisted(id string) bool {
 	until, ok := a.state.FailUntil[id]
 	return ok && time.Now().Unix() < until
@@ -819,6 +1026,31 @@ func (a *App) pickBestLocked() *Node {
 		}
 	}
 	return best
+}
+
+// requestSourceCheck — проверить доступность и задержку только что добавленных
+// (или обновлённых) узлов: в следующем цикле они попадут и в TCP-фазу, и в HTTP-замер.
+func (a *App) requestSourceCheck(ids []string) {
+	a.mu.Lock()
+	if a.pendingCheckIDs == nil {
+		a.pendingCheckIDs = map[string]bool{}
+	}
+	for _, id := range ids {
+		a.pendingCheckIDs[id] = true
+	}
+	a.forceLatency = true
+	a.mu.Unlock()
+	a.requestCheck()
+}
+
+// requestLatencyCheck — перепроверить узлы с немедленным замером HTTP-задержки.
+// Нужен после появления ядра и после загрузки новой подписки: иначе первые
+// узлы висят без задержки до очередного тика.
+func (a *App) requestLatencyCheck() {
+	a.mu.Lock()
+	a.forceLatency = true
+	a.mu.Unlock()
+	a.requestCheck()
 }
 
 // requestCheck ставит проверку в очередь единственного цикла (без новых горутин).

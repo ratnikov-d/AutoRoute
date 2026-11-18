@@ -274,6 +274,7 @@ func (a *App) extractXray(files []*zip.File, rel coreRelease) error {
 	writeInstalled(a.dir, coreInstalled{Tag: rel.Tag, InstalledAt: time.Now().Unix()})
 	a.core.SetBoot("", 0)
 	a.requestApply()
+	a.requestLatencyCheck()
 	return nil
 }
 
@@ -299,6 +300,7 @@ func (a *App) bootCore(ctx context.Context) {
 		if a.core.Ready() {
 			a.core.SetBoot("", 0)
 			a.requestApply()
+			a.requestLatencyCheck()
 			return
 		}
 		rel, err := a.latestRelease(ctx)
@@ -315,6 +317,7 @@ func (a *App) bootCore(ctx context.Context) {
 		log.Printf("ядро: Xray %s установлен в %s", rel.Tag, a.dir)
 		a.core.SetBoot("", 0)
 		a.requestApply()
+		a.requestLatencyCheck()
 		return
 	}
 }

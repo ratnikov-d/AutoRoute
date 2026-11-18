@@ -28,7 +28,8 @@ const (
 type nodeMeta struct {
 	Fails         int    `json:"fails,omitempty"`
 	Oks           int    `json:"oks,omitempty"`
-	RealFails     int    `json:"real_fails,omitempty"`
+	RealFails      int    `json:"real_fails,omitempty"`
+	LatencyTriedAt int64  `json:"latency_tried_at,omitempty"`
 	ExitIP        string `json:"exit_ip,omitempty"`
 	ExitCountry   string `json:"exit_country,omitempty"`
 	ExitCheckedAt int64  `json:"exit_checked_at,omitempty"`
@@ -91,9 +92,11 @@ func (a *App) failThresholdLocked() int {
 
 // countersFromAvailabilityLocked обновляет oks/fails у всех узлов, кроме активного:
 // для активного источником истины служит реальная проверка передачей.
-func (a *App) countersFromAvailabilityLocked(activeID string) {
+func (a *App) countersFromAvailabilityLocked(activeID string, checked map[string]bool) {
 	for _, n := range a.state.Nodes {
-		if n == nil || n.ID == activeID {
+		if n == nil || n.ID == activeID || !checked[n.ID] {
+			// Резерв, который в этом цикле не проверяли, не должен набирать
+			// oks/fails по устаревшему статусу.
 			continue
 		}
 		m := a.metaLocked(n.ID)
