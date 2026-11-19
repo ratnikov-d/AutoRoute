@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -81,6 +82,7 @@ type App struct {
 	refreshing  bool
 	rotating    bool
 	latencyAt   int64
+	latencyNext int64 // unix: следующий замер задержки с учётом джиттера
 	startedAt   time.Time
 	coreStarts  int64
 	forceLatency    bool
@@ -106,7 +108,7 @@ func envInt(k string, def int) int {
 }
 
 // appVersion — версия сборки; последняя цифра увеличивается при каждой пересборке.
-const appVersion = "1.0.44"
+const appVersion = "1.0.50"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -331,7 +333,8 @@ func (a *App) load() {
 	}
 	kept := st.Nodes[:0]
 	for _, n := range st.Nodes {
-		if n == nil {
+		if n == nil || n.Protocol == "awg" {
+			// Поддержка AmneziaWG удалена — старые узлы больше не участвуют.
 			continue
 		}
 		if n.Outbound == nil {
@@ -503,7 +506,7 @@ func copyNodes(nodes []*Node) []*Node {
 }
 
 // doCheck пингует все узлы и в авторежиме выбирает лучший.
-// checkAvailability — TCP+TLS по списку узлов; QUIC/AWG проверяются настоящим
+// checkAvailability — TCP+TLS по списку узлов; QUIC проверяется настоящим
 // запросом через временное ядро. Возвращает результаты по id и признак obfs-strip.
 func (a *App) checkAvailability(ctx context.Context, nodes []*Node) (map[string]checkResult, map[string]bool) {
 	res := make(map[string]checkResult, len(nodes))
@@ -520,7 +523,7 @@ func (a *App) checkAvailability(ctx context.Context, nodes []*Node) (map[string]
 	var quic []*Node
 	a.mu.Lock()
 	for _, n := range nodes {
-		if (n.Quic || n.AWG != "") && n.Unsupported == "" && !a.nodeDisabledLocked(n) {
+		if n.Quic && n.Unsupported == "" && !a.nodeDisabledLocked(n) {
 			cp := *n
 			quic = append(quic, &cp)
 		}
@@ -539,9 +542,9 @@ func (a *App) checkAvailability(ctx context.Context, nodes []*Node) (map[string]
 		a.bumpProgress()
 	}
 	for _, n := range nodes {
-		if (n.Quic || n.AWG != "") && n.Unsupported != "" {
+		if n.Quic && n.Unsupported != "" {
 			a.bumpProgress()
-		} else if (n.Quic || n.AWG != "") && a.nodeDisabled(n) {
+		} else if n.Quic && a.nodeDisabled(n) {
 			a.bumpProgress()
 		}
 	}
@@ -581,7 +584,7 @@ func (a *App) applyChecksLocked(nodes []*Node, res map[string]checkResult, check
 			n.RealMS, n.RealAt = 0, 0
 			m.RealFails++
 		}
-		quic := n.Quic || n.AWG != ""
+		quic := n.Quic
 		httpDead := m.RealFails > 0 && !quic && (wasChecked || inBatch[n.ID])
 		if quic && wasChecked && r.ok && r.ms > 0 {
 			n.RealMS = r.ms
@@ -731,10 +734,10 @@ func (a *App) doCheck() {
 	// 2) Реальная HTTP-задержка — на всех узлах согласно настройке.
 	a.mu.Lock()
 	latURL := latencyURL(a.state.LatencyURL)
-	latEvery := time.Duration(clampLatencyMin(a.state.LatencyMin)) * time.Minute
+	latEvery := nextLatencyDelay(a.state.LatencyMin)
 	forceAll := a.forceAllLatency
 	a.forceAllLatency = false
-	runLatency := a.forceLatency || forceAll || time.Since(time.Unix(a.latencyAt, 0)) >= latEvery
+	runLatency := a.forceLatency || forceAll || a.latencyNext == 0 || time.Now().Unix() >= a.latencyNext
 	a.forceLatency = false
 	chainIDs := map[string]bool{}
 	if mode == "failover" {
@@ -764,13 +767,19 @@ func (a *App) doCheck() {
 			continue
 		}
 		latIDs[n.ID] = true
-		if n.Quic || n.AWG != "" {
-			continue // QUIC/AWG меряются отдельным запросом ниже
+		if n.Quic {
+			continue // QUIC меряется отдельным запросом ниже
 		}
 		cp := *n
 		liveNodes = append(liveNodes, &cp)
 	}
 	a.mu.Unlock()
+	if runLatency && len(liveNodes) > 1 {
+		// Порядок узлов тоже не должен быть фиксированным.
+		rand.Shuffle(len(liveNodes), func(i, j int) {
+			liveNodes[i], liveNodes[j] = liveNodes[j], liveNodes[i]
+		})
+	}
 	if runLatency && len(liveNodes) > 0 {
 		log.Printf("замер HTTP-задержки: %d узлов", len(liveNodes))
 	}
@@ -779,10 +788,10 @@ func (a *App) doCheck() {
 		inBatch[n.ID] = true
 	}
 	realMS := make(map[string]int64, len(liveNodes))
-	// QUIC/AWG не идут через HTTP-батч — меряем их тем же расписанием отдельно.
+	// QUIC не идёт через HTTP-батч — меряем его тем же расписанием отдельно.
 	if runLatency {
 		for _, n := range nodes {
-			if (!n.Quic && n.AWG == "") || n.Unsupported != "" || a.nodeDisabled(n) || !latIDs[n.ID] {
+			if !n.Quic || n.Unsupported != "" || a.nodeDisabled(n) || !latIDs[n.ID] {
 				continue
 			}
 			cp := *n
@@ -801,24 +810,34 @@ func (a *App) doCheck() {
 	}
 	latCtx, latCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer latCancel()
-	for start := 0; runLatency && start < len(liveNodes); start += 6 {
-		end := start + 6
+	for start := 0; runLatency && start < len(liveNodes); {
+		// Размер пачки и пауза между пачками случайные: ровные пачки по 6
+		// с фиксированным интервалом легко читаются как скрипт.
+		size := 4 + rand.Intn(5) // 4..8
+		end := start + size
 		if end > len(liveNodes) {
 			end = len(liveNodes)
 		}
 		for id, ms := range a.core.probeHTTPBatch(latCtx, liveNodes[start:end], latURL, a.bumpProgress) {
 			realMS[id] = ms
 		}
+		start = end
 		if latCtx.Err() != nil {
+			break
+		}
+		if start < len(liveNodes) && !sleepCtx(latCtx, time.Duration(2+rand.Intn(14))*time.Second) {
 			break
 		}
 	}
 	httpAt := time.Now().Unix()
 	// Ядро не готово или замер прерван — это «не проверен», а не «не проходит HTTP».
 	latencyForApply := runLatency && a.core.Ready() && latCtx.Err() == nil
-	if len(realMS) > 0 {
+	if runLatency {
 		a.mu.Lock()
-		a.latencyAt = httpAt
+		a.latencyNext = time.Now().Add(latEvery).Unix()
+		if len(realMS) > 0 {
+			a.latencyAt = httpAt
+		}
 		a.mu.Unlock()
 	}
 
@@ -878,7 +897,7 @@ func (a *App) doCheck() {
 		if needApply {
 			a.requestApply()
 		}
-		if activeID != "" && a.exitStaleLocked(activeID, tcpAt) && a.core.Running() && a.socksOn() {
+		if activeID != "" && a.exitStaleLocked(activeID, tcpAt) {
 			go func(id string) {
 				res := a.lookupExit()
 				if !res.OK || res.IP == "" {

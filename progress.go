@@ -26,7 +26,7 @@ func checkAllProgress(ctx context.Context, nodes []*Node, done func()) []checkRe
 			case n.Unsupported != "":
 				res[i] = checkResult{status: "unsupported", err: n.Unsupported}
 				notify()
-			case n.Quic, n.AWG != "":
+			case n.Quic:
 				// QUIC проверяется отдельно, в doCheck (временное ядро + SOCKS).
 			default:
 				sem <- struct{}{}

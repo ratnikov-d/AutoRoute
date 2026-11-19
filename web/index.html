@@ -2105,16 +2105,17 @@ html[data-theme="dusk"] .icon-btn{transition-duration:100ms!important}
       '<label class="field"><span class="field-label">Тест доступности серверов (TCP), секунды (15-3600)</span>' +
       '<input type="number" id="s-interval" min="15" max="3600" step="1" inputmode="numeric" value="' +
         esc(cur) + '"></label>' +
-      '<label class="field"><span class="field-label">Измерение задержки (HTTP), минуты (1-60)</span>' +
-      '<input type="number" id="s-latevery" min="1" max="60" step="1" inputmode="numeric" value="' +
-        esc(String((state && state.latency_every_min) || 10)) + '"></label>' +
-      '<div class="muted small">Частый замер задержки (HTTP) нагружает CPU</div>' +
+      '<label class="field"><span class="field-label">Измерение задержки (HTTP), минуты (30-60)</span>' +
+      '<input type="number" id="s-latevery" min="30" max="60" step="1" inputmode="numeric" value="' +
+        esc(String((state && state.latency_every_min) || 45)) + '"></label>' +
+      '<div class="muted small">К периоду добавляется случайный джиттер ±30%, порядок узлов, ' +
+        'размер пачек и паузы между ними тоже случайные — это снижает заметность зондов.</div>' +
       '<label class="field"><span class="field-label">Адрес для замера задержки</span>' +
       '<input type="text" id="s-laturl" spellcheck="false" autocomplete="off" value="' + esc(latURL) + '"' +
         ' placeholder="https://www.gstatic.com/generate_204"></label>' +
       '<div class="muted small">Через каждый узел отправляется один GET-запрос на этот адрес, ' +
-        'время полного ответа показывается как задержка. Лучше держать здесь лёгкий 204-эндпоинт ' +
-        '(gstatic, cloudflare), а не страницу с редиректами.</div>' +
+        'время полного ответа показывается как задержка. Запрос идёт внутри VPN, ' +
+        'поэтому адрес можно не менять — оставьте лёгкий 204-эндпоинт без редиректов.</div>' +
       '<div class="form-error" id="s-err" hidden></div>',
       [
         { label: 'Отмена', kind: 'text', onClick: closeModal },
@@ -2124,8 +2125,8 @@ html[data-theme="dusk"] .icon-btn{transition-duration:100ms!important}
             var err = $('#s-err');
             var ur = ($('#s-laturl').value || '').trim();
             var le = parseInt($('#s-latevery').value, 10);
-            if (!le || le < 1 || le > 60) {
-              err.textContent = 'Замер задержки: 1-60 минут';
+            if (!le || le < 30 || le > 60) {
+              err.textContent = 'Замер задержки: 30-60 минут';
               err.hidden = false;
               return;
             }
@@ -2944,7 +2945,7 @@ html[data-theme="dusk"] .icon-btn{transition-duration:100ms!important}
   function shortProto(n) {
     var p = String(n.protocol || '').toLowerCase();
     var base = ({
-      vless: 'vless', vmess: 'vmess', trojan: 'trojan', awg: 'awg', wireguard: 'wg',
+      vless: 'vless', vmess: 'vmess', trojan: 'trojan', wireguard: 'wg',
       shadowsocks: 'ss', ss: 'ss', socks: 'socks',
       hysteria2: 'hysteria2', hysteria: 'hysteria2'
     })[p] || p;
@@ -4058,7 +4059,7 @@ html[data-theme="dusk"] .icon-btn{transition-duration:100ms!important}
       '<div><b>Ручной.</b> Измеряется только активный узел. Узел закреплён вручную.</div>' +
       '<div>Отключённые и не участвующие в работе серверы в плановые измерения не попадают. ' +
         'Разовый принудительный замер только что добавленной подписки выполняется во всех режимах. ' +
-        'Для QUIC и AmneziaWG задержка измеряется отдельным запросом по тому же расписанию.</div>' +
+        'Для QUIC задержка измеряется отдельным запросом по тому же расписанию.</div>' +
       '</div>',
       [{ label: 'Понятно', kind: 'filled', onClick: closeModal }]);
   });

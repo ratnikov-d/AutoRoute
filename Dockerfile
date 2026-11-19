@@ -5,13 +5,6 @@
 # релиз XTLS в /data/core/xray — переживает reboot и замену образа, но исчезает
 # при удалении контейнера (root-dir стирается).
 
-# --- AmneziaWG (userspace, поддержка AWG 2.0: i1..i5, header protection) ---
-FROM golang:1.25-alpine AS awg
-ARG AWG_VERSION=v3.1.20260828
-RUN apk add --no-cache git \
- && CGO_ENABLED=0 GOOS=linux go install github.com/amnezia-vpn/amneziawg-go/v3@${AWG_VERSION} \
- && ls -l /go/bin/amneziawg-go
-
 # --- сам сервис (stdlib, без внешних зависимостей) ---
 FROM golang:1.22-alpine AS build
 WORKDIR /src
@@ -24,7 +17,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/autorou
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=build /out/autoroute           /usr/local/bin/autoroute
-COPY --from=awg   /go/bin/amneziawg-go  /usr/local/bin/amneziawg-go
 
 ENV DATA_DIR=/data \
     LISTEN=:8080 \

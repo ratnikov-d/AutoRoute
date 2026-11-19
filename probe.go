@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,19 @@ import (
 // Cloudflare trace: anycast, без лимитов на частоту (в отличие от ifconfig.me/ipify),
 // формат: строки key=value, нам нужны ip= и loc=.
 const defaultProbeURL = "https://1.1.1.1/cdn-cgi/trace"
+
+// Браузерные UA для зондов. Один curl/8.0 на все узлы — лёгкий отпечаток.
+var probeUserAgents = []string{
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+}
+
+func randomUA() string {
+	return probeUserAgents[rand.Intn(len(probeUserAgents))]
+}
 
 type probeResult struct {
 	OK     bool   `json:"ok"`
@@ -60,7 +74,9 @@ func probeSocks(ctx context.Context, port int, target string, insecure bool) pro
 	if err != nil {
 		return probeResult{Error: err.Error()}
 	}
-	req.Header.Set("User-Agent", "curl/8.0")
+	req.Header.Set("User-Agent", randomUA())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	resp, err := client.Do(req)
 	if err != nil {
 		return probeResult{Error: shortErr(err)}

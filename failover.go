@@ -405,6 +405,23 @@ func (a *App) handleNodeCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// nodeByID возвращает копию узла по id для проверок без живого SOCKS.
+func (a *App) nodeByID(id string) *Node {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if id == "" {
+		id = a.state.Selected
+	}
+	if id == "" {
+		id = a.appliedID
+	}
+	if n := findNode(a.state.Nodes, id); n != nil {
+		cp := *n
+		return &cp
+	}
+	return nil
+}
+
 // probeViaTempNode проверяет текущий узел временным ядром (SOCKS поднимается
 // только на время запроса); живое ядро и socks_enabled не меняются.
 func (a *App) probeViaTempNode(ctx context.Context, target string) probeResult {
@@ -479,22 +496,41 @@ func (a *App) handleFailoverChain(w http.ResponseWriter, r *http.Request) {
 
 // failoverTick — часть doCheck для режима failover.
 func (a *App) failoverProbe(activeID string) (res probeResult, probed bool) {
-	if activeID == "" || !a.core.Running() || !a.socksOn() {
+	if activeID == "" {
 		return probeResult{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
+	if !a.socksOn() || !a.core.Running() {
+		// SOCKS выключен — поднимаем временное ядро с тем же узлом.
+		if n := a.nodeByID(activeID); n != nil {
+			return a.probeNodeExitTargets(ctx, n, failoverProbeURL), true
+		}
+		return probeResult{}, false
+	}
 	res = a.core.probeThroughTunnel(ctx, failoverProbeURL, false)
 	return res, true
 }
 
 func (a *App) lookupExit() probeResult {
-	if !a.core.Running() || !a.socksOn() {
-		return probeResult{}
+	a.mu.Lock()
+	id := a.state.Selected
+	if id == "" {
+		id = a.appliedID
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	return a.core.probeThroughTunnel(ctx, defaultProbeURL, false)
+	a.mu.Unlock()
+	if a.core.Running() && a.socksOn() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return a.core.probeThroughTunnel(ctx, defaultProbeURL, false)
+	}
+	// Без SOCKS выходной IP определяется через временное ядро с активным узлом.
+	if n := a.nodeByID(id); n != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		return a.probeNodeExit(ctx, n)
+	}
+	return probeResult{}
 }
 
 // probeNodeExit поднимает временный Xray с одним узлом и узнаёт выходной IP/страну.
@@ -534,15 +570,6 @@ func (a *App) probeNodeExitOnce(ctx context.Context, node *Node, target string) 
 	targets := exitProbeURLs
 	if target != "" {
 		targets = append([]string{target}, exitProbeURLs...)
-	}
-	// AWG: свой временный туннель, иначе запрос ушёл бы через активный awg0.
-	if node != nil && node.AWG != "" {
-		dev, err := startAWGDevice(awgProbeIf, node.AWG, awgProbeMark, awgProbeTab)
-		if err != nil {
-			return probeResult{Error: "AWG: " + err.Error()}
-		}
-		defer dev.Stop()
-		return a.probeWithOutboundTargets(ctx, awgOutbound(awgProbeMark), targets)
 	}
 	return a.probeWithOutboundTargets(ctx, nodeOutbound(node), targets)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -23,13 +24,14 @@ const defaultLatencyURL = "https://www.gstatic.com/generate_204"
 const (
 	latencyProbeWorkers   = 4
 	latencyRequestTimeout = 10 * time.Second
-	latencyFresh          = 20 * time.Minute
-	defaultLatencyMin   = 10 // как часто мерить HTTP-задержку, если не задано
-	minLatencyMin       = 1
-	maxLatencyMin       = 60
+	latencyFresh          = 90 * time.Minute // запас для периода 30..60 мин + джиттер
+	defaultLatencyMin     = 45               // базовый период замера HTTP-задержки
+	minLatencyMin         = 30
+	maxLatencyMin         = 60
+	latencyJitter         = 0.30 // ±30% к периоду
 )
 
-// clampLatencyMin — период замера задержки в минутах (1..60).
+// clampLatencyMin — базовый период замера задержки в минутах (30..60).
 func clampLatencyMin(v int) int {
 	if v < minLatencyMin || v > maxLatencyMin {
 		return defaultLatencyMin
@@ -70,6 +72,26 @@ func latencyURL(s string) string {
 		return defaultLatencyURL
 	}
 	return s
+}
+
+// nextLatencyDelay — следующий интервал с джиттером ±30%.
+func nextLatencyDelay(minutes int) time.Duration {
+	base := float64(time.Duration(clampLatencyMin(minutes)) * time.Minute)
+	lo := base * (1 - latencyJitter)
+	hi := base * (1 + latencyJitter)
+	return time.Duration(lo + rand.Float64()*(hi-lo))
+}
+
+// sleepCtx — пауза, которую можно прервать отменой контекста.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // freshReal — свежая реальная HTTP-задержка (0, если её нет).

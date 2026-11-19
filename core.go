@@ -61,8 +61,6 @@ func (r *ring) slice() []string {
 type Core struct {
 	mu      sync.Mutex
 	applyMu sync.Mutex
-	awgMu   sync.Mutex
-	awgDev  *awgDevice
 	// probeMu сериализует временные ядра: у них общие файлы конфигов и порты,
 	// параллельный запуск ломает проверки.
 	probeMu sync.Mutex
@@ -306,7 +304,7 @@ func (c *Core) Apply(node *Node) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 
-	cfg := buildConfig(c, nodeOutbound(node), node != nil && node.AWG != "")
+	cfg := buildConfig(c, nodeOutbound(node))
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -332,8 +330,6 @@ func (c *Core) Apply(node *Node) error {
 		return err
 	}
 	c.Stop()
-	// AWG-узлу нужен интерфейс до старта ядра: Xray выходит в него freedom'ом.
-	c.prepareAWG(node)
 	c.mu.Lock()
 	c.gen++
 	gen := c.gen
@@ -361,7 +357,7 @@ func nodeOutbound(node *Node) map[string]any {
 	return node.Outbound
 }
 
-func buildConfig(c *Core, nodeOut map[string]any, awgTunnel bool) map[string]any {
+func buildConfig(c *Core, nodeOut map[string]any) map[string]any {
 	// Копия: outbound узла переиспользуется, его тег менять нельзя.
 	ob := map[string]any{"tag": "node"}
 	if nodeOut == nil {
@@ -378,10 +374,7 @@ func buildConfig(c *Core, nodeOut map[string]any, awgTunnel bool) map[string]any
 		"gateway": []string{c.tunAddr},
 	}
 	// autoOutboundsInterface прибивает outbound к основному интерфейсу.
-	// Для AWG это ломает метку (mark) и трафик уходит мимо туннеля.
-	if !awgTunnel {
-		tunSettings["autoOutboundsInterface"] = "auto"
-	}
+	tunSettings["autoOutboundsInterface"] = "auto" 
 	inbounds := []any{
 		map[string]any{
 			"tag":      "tun-in",
@@ -479,43 +472,9 @@ func (c *Core) Stop() {
 			<-done
 		}
 	}
-	c.stopAWG()
 	// Чтобы трафик, ушедший в контейнер, не крутился по кругу без тоннеля.
 	if c.setupRoutes {
 		run("ip", "route", "replace", "blackhole", "default", "table", routingTable)
-	}
-}
-
-// prepareAWG поднимает awg0 под выбранный узел (или гасит, если узел обычный).
-func (c *Core) prepareAWG(node *Node) {
-	if node == nil || node.AWG == "" {
-		c.stopAWG()
-		return
-	}
-	c.awgMu.Lock()
-	defer c.awgMu.Unlock()
-	if c.awgDev != nil {
-		c.awgDev.Stop()
-		c.awgDev = nil
-	}
-	dev, err := startAWGDevice(awgIfName, node.AWG, awgMark, awgTable)
-	if err != nil {
-		c.mu.Lock()
-		c.lastErr = "AWG: " + err.Error()
-		c.mu.Unlock()
-		c.logs.add("AWG: " + err.Error())
-		return
-	}
-	c.awgDev = dev
-	c.logs.add("AWG-туннель поднят: " + node.Name)
-}
-
-func (c *Core) stopAWG() {
-	c.awgMu.Lock()
-	defer c.awgMu.Unlock()
-	if c.awgDev != nil {
-		c.awgDev.Stop()
-		c.awgDev = nil
 	}
 }
 
@@ -680,12 +639,6 @@ func (c *Core) Diag() map[string]any {
 		"table_100":     run("ip", "route", "show", "table", routingTable),
 		"tun_name":      c.tunName,
 		"core_version":  c.version,
-		"awg_rule":      run("ip", "rule", "show"),
-		"awg_table":     run("ip", "route", "show", "table", strconv.Itoa(awgTable)),
-		"awg_link":      run("ip", "link", "show", awgIfName),
-		"awg_tx":        readSysFile("/sys/class/net/" + awgIfName + "/statistics/tx_bytes"),
-		"awg_rx":        readSysFile("/sys/class/net/" + awgIfName + "/statistics/rx_bytes"),
-		"awg_peers":     readSysFile("/proc/net/amneziawg/" + awgIfName),
 		"mem_current":   readSysFile("/sys/fs/cgroup/memory.current"),
 		"mem_peak":      readSysFile("/sys/fs/cgroup/memory.peak"),
 		"mem_max":       readSysFile("/sys/fs/cgroup/memory.max"),
@@ -700,9 +653,6 @@ func (c *Core) Diag() map[string]any {
 // ProbeNode проверяет узел, поднимая временный Xray с SOCKS-инбаундом (нужно для
 // QUIC-узлов: hysteria2 по TCP не проверить). Если с obfs не вышло, пробует без него.
 func (c *Core) ProbeNode(ctx context.Context, node *Node) (ok bool, ms int64, errMsg string, usedAlt bool) {
-	if node != nil && node.AWG != "" {
-		return c.probeAWGNode(ctx, node)
-	}
 	ok, ms, errMsg = c.probeWithOutbound(ctx, node, nodeOutbound(node))
 	if ok || node.AltOutbound == nil || node.ObfsStripped {
 		return ok, ms, errMsg, false

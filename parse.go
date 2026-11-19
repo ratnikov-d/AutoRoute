@@ -43,11 +43,9 @@ type Node struct {
 	AltOutbound   map[string]any `json:"alt_outbound,omitempty"`
 	ObfsStripped  bool           `json:"obfs_stripped,omitempty"`
 
-	// AmneziaWG: исходный INI-конфиг из ссылки vpn:// (AWG 1.5 / 2.0).
-	AWG string `json:"awg,omitempty"`
 }
 
-var supportedSchemes = []string{"vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://", "vpn://", "awg://"}
+var supportedSchemes = []string{"vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://"}
 
 func isSupportedLink(s string) bool {
 	for _, p := range supportedSchemes {
@@ -94,8 +92,6 @@ func ParseLink(raw string) (*Node, error) {
 		n, ob, err = parseSS(raw)
 	case strings.HasPrefix(raw, "hysteria2://"), strings.HasPrefix(raw, "hy2://"):
 		n, ob, err = parseHysteria2(raw)
-	case strings.HasPrefix(raw, "vpn://"), strings.HasPrefix(raw, "awg://"):
-		n, ob, err = parseAmnezia(raw)
 	default:
 		return nil, errors.New("неизвестный протокол")
 	}
@@ -434,56 +430,6 @@ func parseSS(raw string) (*Node, map[string]any, error) {
 		},
 	}
 	return &Node{Name: name, Protocol: "ss", Host: host, Port: port, Security: "none", Transport: "tcp"}, ob, nil
-}
-
-// --- AmneziaWG (vpn:// из Amnezia, awg:// как синоним) ---
-
-func parseAmnezia(raw string) (*Node, map[string]any, error) {
-	body := raw
-	if i := strings.Index(body, "://"); i > 0 {
-		body = body[i+3:]
-	}
-	text, err := decodeAnyB64(body)
-	if err != nil {
-		return nil, nil, errors.New("vpn://: не base64")
-	}
-	cfg := string(text)
-	host, port := awgEndpoint(cfg)
-	if host == "" || port == 0 {
-		return nil, nil, errors.New("vpn://: нет Endpoint в конфиге")
-	}
-	name := awgName(cfg)
-	if name == "" {
-		name = host + ":" + strconv.Itoa(port)
-	}
-	n := &Node{
-		Protocol: "awg",
-		Name:     name,
-		Host:     host,
-		Port:     port,
-		AWG:      cfg,
-		Status:   "unknown",
-	}
-	// Имя: сначала fragment ссылки (если он есть), иначе комментарий из конфига.
-	if u, err := url.Parse(raw); err == nil && u.Fragment != "" {
-		if frag := fragName(u, host, port); frag != "" {
-			n.Name = frag
-		}
-	}
-	return n, awgOutbound(awgMark), nil
-}
-
-// awgName берёт имя из комментария внутри конфига: "# 🇱🇹 1. Amnezia".
-func awgName(cfg string) string {
-	for _, line := range strings.Split(cfg, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(l, "#") {
-			if t := strings.TrimSpace(strings.TrimPrefix(l, "#")); t != "" {
-				return t
-			}
-		}
-	}
-	return ""
 }
 
 // decodeAnyB64 терпит URL-safe алфавит и отсутствие паддинга.
