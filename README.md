@@ -68,6 +68,10 @@ docker run -d --name autoroute -p 8080:8080 \
 Архитектуры: `linux/arm64` (hAP ax2/ax3, RB5009, CCR2004), `linux/arm/v7` (RB4011),
 `linux/amd64`. MIPS-платы (hEX, hAP ac²) контейнеры не поддерживают.
 
+Docker Hub публикует один multi-arch manifest сразу для всех трёх платформ — RouterOS
+сам выбирает нужный слой по `arch=`, отдельные теги не нужны. На RouterOS 7.25 для
+вытягивания с Docker Hub может потребоваться `check-certificate=no` в `/container/add`.
+
 Дальше используются условные имена — подставь свои:
 
 | Обозначение | Что это | Пример |
